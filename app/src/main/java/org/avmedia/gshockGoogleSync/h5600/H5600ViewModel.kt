@@ -233,6 +233,7 @@ class H5600ViewModel @Inject constructor(
     /** The user's choice: becomes the base mode the scheduler returns to after every alarm. */
     fun setSoundMode(mode: SoundMode) {
         H5600Prefs.setBaseSoundMode(context, mode)
+        runner.forgetWatchState() // written outside the scheduler: its next pass reads the watch
         val previous = _state.value.soundMode
         _state.update { it.copy(soundMode = mode) } // move the UI immediately
         write(KEY_SOUND, "set sound mode", onError = { _state.update { it.copy(soundMode = previous) } }) {

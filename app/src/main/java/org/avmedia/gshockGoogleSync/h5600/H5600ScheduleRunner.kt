@@ -220,6 +220,23 @@ class H5600ScheduleRunner @Inject constructor(
 
     @Volatile private var lastSunResend: LocalDateTime? = null
 
+    /**
+     * What the watch holds, as last read from it or written to it on this connection: lets a planned
+     * alarm pass skip the watch entirely when nothing has to change (battery). Null = unknown, read
+     * it. Cleared on every connect/disconnect, any failed pass, any write from elsewhere
+     * ([forgetWatchState]) and after [WATCH_STATE_MAX_AGE_H] hours (the watch may drift on its own).
+     */
+    private data class WatchState(
+        val alarms: List<org.avmedia.gshockapi.model.Alarm>,
+        val smart: SmartAlarm?,
+        val sound: SoundMode,
+        val at: LocalDateTime,
+    )
+    @Volatile private var watchState: WatchState? = null
+
+    /** Something other than the scheduler wrote to the watch: the next pass reads it again. */
+    fun forgetWatchState() { watchState = null }
+
     /** "Send loc/time" button, temperature-trick corrections, real sunrise restored. */
     suspend fun syncLocationAndTime() = mutex.withLock {
         if (api.isH5600SettingsSupported()) syncTimeAndLocation()
@@ -240,6 +257,7 @@ class H5600ScheduleRunner @Inject constructor(
     /** Called once per connection when the session is Ready. */
     suspend fun onConnected(applySchedule: Boolean) {
         if (!api.isH5600SettingsSupported()) return
+        watchState = null // a new connection: read what the watch really has
         watchCall("0x39 handshake") { withTimeout(15_000) { api.h5600ConnectionHandshake() } }
         // Smart Sync's connect routine rewrites the home / world-city packets (1D/1E/1F), which makes
         // the watch drop its sun location -> dashes. One loc/time sync per connection fixes it, and
@@ -336,7 +354,7 @@ class H5600ScheduleRunner @Inject constructor(
      * Alarm slots (snoozing alarms at their next repeat), smart-alarm slot and sound mode for the
      * alarm due next.
      */
-    private suspend fun applyAlarmsLocked(notes: MutableList<String>): Boolean {
+    private suspend fun applyAlarmsLocked(notes: MutableList<String>, planned: Boolean = false): Boolean {
         val loaded = AlarmPool.load(context) ?: return true // null until the Alarms tab has been opened once
         val now = LocalDateTime.now()
         // One-time alarms that have rung (and whose snooze was stopped) switch themselves off.
@@ -346,9 +364,33 @@ class H5600ScheduleRunner @Inject constructor(
             notes += "one-time alarm off: " + pool.filterIndexed { i, a -> !a.enabled && loaded[i].enabled }
                 .joinToString(" ") { AppTimeFormat.hm(it.hour, it.minute) }
         }
+        // Planned passes (boundary loop) trust the known watch state; user actions read the watch.
+        val known = watchState?.takeIf { planned && Duration.between(it.at, now).toHours() < WATCH_STATE_MAX_AGE_H }
+        if (known != null) {
+            val plan = AlarmPool.plan(pool, AlarmPool.loadedIds(context), now)
+            val wanted = AlarmPool.toWatchAlarms(plan, pool, known.alarms, now)
+            val smartId = AlarmPool.planSmart(pool, now)
+            val smart = pool.firstOrNull { it.id == smartId }
+            val wantedSmart = known.smart?.let { cur ->
+                smart?.let { SmartAlarm(it.hour, it.minute, true, false, it.smartWindowMin) } ?: cur.copy(enabled = false)
+            }
+            val base = AlarmPool.baseAt(H5600Prefs.baseSoundMode(context), H5600Prefs.nightDnd(context), now)
+            val desired = AlarmPool.desiredSoundMode(pool, now, base)
+            if (AlarmPool.sameOnWatch(wanted, known.alarms) && wantedSmart == known.smart && desired == known.sound) {
+                Timber.i("H5600 planned alarm pass: watch already matches, not contacted")
+                AlarmPool.saveLoadedIds(context, plan)
+                AlarmPool.saveLoadedSmartId(context, smartId)
+                showSnoozing(AlarmPool.snoozing(pool, now))
+                onPoolChanged?.invoke()
+                return true
+            }
+        }
+        watchState = null // re-learnt below; stays unknown if the pass fails
+        var learnt: WatchState? = null
         val ok = watchCall("alarm schedule", notes) {
             withTimeout(45_000) {
-                val watch = api.getAlarms() // the library shares/retries concurrent reads
+                // Writing anyway: start from the known slots (no read) when they are fresh.
+                val watch = known?.alarms ?: api.getAlarms() // the library shares/retries concurrent reads
                 val plan = AlarmPool.plan(pool, AlarmPool.loadedIds(context), now)
                 val wanted = AlarmPool.toWatchAlarms(plan, pool, watch, now)
                 if (!AlarmPool.sameOnWatch(wanted, watch)) {
@@ -362,13 +404,15 @@ class H5600ScheduleRunner @Inject constructor(
                 // Smart-alarm slot (0x50): the next smart alarm within 24 h, or off.
                 val smartId = AlarmPool.planSmart(pool, now)
                 val smart = pool.firstOrNull { it.id == smartId }
-                val current = api.getH5600SmartAlarm()
+                val current = if (known != null) known.smart else api.getH5600SmartAlarm()
+                var smartNow = current
                 if (current != null) {
                     // Watch snooze off: the phone snoozes it from the target time (a normal slot).
                     val wantedSmart = smart?.let { SmartAlarm(it.hour, it.minute, true, false, it.smartWindowMin) }
                         ?: current.copy(enabled = false)
                     if (wantedSmart != current) {
                         api.setH5600SmartAlarm(wantedSmart)
+                        smartNow = wantedSmart
                         notes += "smart alarm: " + (smart?.let { AppTimeFormat.hm(it.hour, it.minute) + " (−${it.smartWindowMin} min)" } ?: "off")
                     }
                     AlarmPool.saveLoadedSmartId(context, smartId)
@@ -378,12 +422,15 @@ class H5600ScheduleRunner @Inject constructor(
                 // until it and its snooze are over); then back to the user's mode.
                 val base = AlarmPool.baseAt(H5600Prefs.baseSoundMode(context), H5600Prefs.nightDnd(context), now)
                 val desired = AlarmPool.desiredSoundMode(pool, now, base)
-                val before = api.setSoundMode(desired) // one read; no write if already equal
+                // Known and already right: no read. Otherwise one read, and a write only if different.
+                val before = if (known?.sound == desired) desired else api.setSoundMode(desired)
                 if (before != desired) notes += "sound ${before ?: "?"} → $desired"
                 org.avmedia.gshockGoogleSync.utils.LastKnown.put(context, "sound_mode", desired.code) // Custom tab shows it
                 soundModeSet.value = desired
+                learnt = WatchState(ArrayList(wanted), smartNow, desired, if (known != null) known.at else now)
             }
         }
+        watchState = learnt
         showSnoozing(AlarmPool.snoozing(pool, now))
         onPoolChanged?.invoke() // Alarms tab: on-watch tags, snooze buttons, one-time alarms switched off
         return ok != null
@@ -466,7 +513,7 @@ class H5600ScheduleRunner @Inject constructor(
                 SchedulerWakeup.awake(context) { mutex.withLock {
                     if (!api.isH5600SettingsSupported()) return@withLock
                     val notes = mutableListOf<String>()
-                    if (alarmAt != null && !woke.isBefore(alarmAt)) onAlarmPass(applyAlarmsLocked(notes))
+                    if (alarmAt != null && !woke.isBefore(alarmAt)) onAlarmPass(applyAlarmsLocked(notes, planned = true))
                     applyPeriodicLocked(notes) // each part checks its own due time
                     if (faceAt != null && !woke.isBefore(faceAt)) applySunFaceLocked(notes)
                     if (notes.isNotEmpty()) record(notes)
@@ -475,6 +522,10 @@ class H5600ScheduleRunner @Inject constructor(
         }
         session.state.first { it.phase is SessionPhase.Closed }
         loop.cancel()
+        watchState = null
         SchedulerWakeup.cancel(context) // nothing to do on the watch until it reconnects
     }
 }
+
+/** A planned pass trusts the known watch state for at most this long, then reads the watch again. */
+private const val WATCH_STATE_MAX_AGE_H = 6L
