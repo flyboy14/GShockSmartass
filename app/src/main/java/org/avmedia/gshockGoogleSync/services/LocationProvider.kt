@@ -7,6 +7,11 @@ import android.location.Geocoder
 import android.location.LocationManager
 import android.telephony.TelephonyManager
 import androidx.annotation.RequiresPermission
+import androidx.core.location.LocationManagerCompat
+import androidx.core.os.CancellationSignal
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.text.uppercase
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
@@ -44,14 +49,94 @@ object LocationProvider {
      * one — before, an exception skipped the fallback and returned null.
      */
     @SuppressLint("MissingPermission")
-    fun getLocation(context: Context): Location? =
-        when (val result = runCatching { getLocationResult(context) }.getOrNull()) {
+    fun getLocation(context: Context): Location? {
+        val result = runCatching { getLocationResult(context) }.getOrNull()
+        // Without Google Play Services (GrapheneOS) nobody fills the providers' last fix: ask for one.
+        if (result !is LocationResult.Success) requestFreshAsync(context)
+        return when (result) {
             is LocationResult.Success -> {
                 cacheLocation(context, result.location)
                 result.location
             }
             else -> runCatching { getCachedLocation(context) }.getOrNull()
         }
+    }
+
+    private const val FRESH_MAX_AGE_MS = 60 * 60_000L
+    private const val REQUEST_GAP_MS = 5 * 60_000L
+    private val lastRequestAt = AtomicLong(0)
+
+    /**
+     * Asks the providers for a current fix when the newest last-known one is missing or older than
+     * an hour; caches it. On stock Android Google Play Services keeps the last fix warm for every
+     * app; on GrapheneOS (no Play) the last fix stays null until some app requests one.
+     */
+    suspend fun refreshIfStale(context: Context, timeoutMs: Long = 30_000): Location? {
+        val newest = runCatching { newestLastKnown(context) }.getOrNull()
+        if (newest != null && System.currentTimeMillis() - newest.time < FRESH_MAX_AGE_MS) {
+            return Location.fromAndroidLocation(newest).also { cacheLocation(context, it) }
+        }
+        return withTimeoutOrNull(timeoutMs) { requestCurrent(context) }?.also { cacheLocation(context, it) }
+    }
+
+    private fun requestFreshAsync(context: Context) {
+        val now = System.currentTimeMillis()
+        val last = lastRequestAt.get()
+        if (now - last < REQUEST_GAP_MS || !lastRequestAt.compareAndSet(last, now)) return
+        val app = context.applicationContext
+        val lm = app.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
+        usableProviders(lm).forEach { p ->
+            runCatching {
+                LocationManagerCompat.getCurrentLocation(lm, p, null as CancellationSignal?, ContextCompat.getMainExecutor(app)) { loc ->
+                    if (loc != null) runCatching { cacheLocation(app, Location.fromAndroidLocation(loc)) }
+                }
+            }
+        }
+    }
+
+    /** First fix any usable provider delivers (network answers in seconds, GPS may take long). */
+    @SuppressLint("MissingPermission")
+    private suspend fun requestCurrent(context: Context): Location? {
+        val app = context.applicationContext
+        val lm = app.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
+        val providers = usableProviders(lm)
+        if (providers.isEmpty()) return null
+        lastRequestAt.set(System.currentTimeMillis())
+        return suspendCancellableCoroutine { cont ->
+            val signal = CancellationSignal()
+            val pending = java.util.concurrent.atomic.AtomicInteger(providers.size)
+            val done = java.util.concurrent.atomic.AtomicBoolean(false)
+            cont.invokeOnCancellation { signal.cancel() }
+            providers.forEach { p ->
+                val started = runCatching {
+                    LocationManagerCompat.getCurrentLocation(lm, p, signal, ContextCompat.getMainExecutor(app)) { loc ->
+                        val left = pending.decrementAndGet()
+                        if (loc != null) { if (done.compareAndSet(false, true)) { signal.cancel(); cont.resume(Location.fromAndroidLocation(loc)) } }
+                        else if (left == 0 && done.compareAndSet(false, true)) cont.resume(null)
+                    }
+                }.isSuccess
+                if (!started && pending.decrementAndGet() == 0 && done.compareAndSet(false, true)) cont.resume(null)
+            }
+        }
+    }
+
+    /** Enabled providers this app may use: GPS needs precise location, network/fused work with coarse. */
+    private fun usableProviders(lm: LocationManager): List<String> {
+        return buildList {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) add(LocationManager.FUSED_PROVIDER)
+            add(LocationManager.NETWORK_PROVIDER)
+            add(LocationManager.GPS_PROVIDER)
+        }.filter { p -> runCatching { lm.isProviderEnabled(p) }.getOrDefault(false) }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun newestLastKnown(context: Context): android.location.Location? {
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
+        return listOf(LocationManager.NETWORK_PROVIDER, LocationManager.GPS_PROVIDER, LocationManager.PASSIVE_PROVIDER)
+            .plus(if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) listOf(LocationManager.FUSED_PROVIDER) else emptyList())
+            .mapNotNull { p -> runCatching { lm.getLastKnownLocation(p) }.getOrNull() }
+            .maxByOrNull { it.time }
+    }
 
     @RequiresPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
     private fun getLocationResult(context: Context): LocationResult {

@@ -265,6 +265,8 @@ class H5600ScheduleRunner @Inject constructor(
         // snooze, but the phone does the snoozing, so syncs never have to wait.)
         // Weather due as well? Fetch it first, so this one sync carries it — instead of a second
         // full time sync from the weather refresh a few seconds later.
+        // No Play Services (GrapheneOS): the providers keep no last fix unless someone asks for one.
+        watchCall("location refresh") { LocationProvider.refreshIfStale(context) }
         if (TempSun.isEnabled(context) && TempSun.isStale(context)) {
             LocationProvider.getLocation(context)?.let { loc ->
                 watchCall("weather on connect") {
@@ -441,6 +443,7 @@ class H5600ScheduleRunner @Inject constructor(
         // Not while an alarm or a snooze repeat rings; the pass a minute later catches up.
         if (AlarmPool.load(context)?.let { AlarmPool.ringing(it, LocalDateTime.now()) } == true) return
         if (SyncPacing.isQuiet(LocalDateTime.now())) return // battery: nothing periodic overnight
+        watchCall("location refresh", notes) { LocationProvider.refreshIfStale(context) }
         refreshTempSunLocked(force = false)?.let { notes += it }
         resendSunIfDue()?.let { notes += it }
     }
