@@ -49,7 +49,9 @@ class NotificationMonitorService : NotificationListenerService() {
         // moment of use, so a recreated service instance cannot miss a connection event.
         if (!sessionManager.isReady) return
         // Per-app allowlist (set in Settings > DW-H5600 card). Disabled = forward everything.
-        if (!org.avmedia.gshockGoogleSync.h5600.NotificationFilter.allows(applicationContext, sbn.packageName)) return
+        // Debug builds also pass adb test notifications: adb shell cmd notification post -t Title tag Text
+        val adbTest = org.avmedia.gshockGoogleSync.BuildConfig.DEBUG && sbn.packageName == "com.android.shell"
+        if (!adbTest && !org.avmedia.gshockGoogleSync.h5600.NotificationFilter.allows(applicationContext, sbn.packageName)) return
 
         processNotification(sbn)
             .onSuccess { notificationInfo ->
