@@ -269,7 +269,7 @@ private fun SunWeatherCard(vm: H5600ViewModel) {
         Column(modifier = Modifier.padding(12.dp)) {
             CardTitle("Sun & weather", "Weather instead of sunrise: the sun screen's top line shows W:TT, " +
                 "W = 1 sunny, 2 cloudy, 3 rain/snow, 4 extreme (heavy rain, storm, gusts ≥ 60 km/h); TT = °C (0–59). " +
-                "E.g. 1:18 = sunny 18 °C. Sunset stays real. Updates hourly while connected, not from 00:00 to 06:00 (saves the watch's battery).<br><br>" +
+                "E.g. 1:18 = sunny 18 °C. Sunset stays real. Weather updates hourly while connected, not from 00:00 to 06:00 (saves the watch's battery); the watch is reminded of it every 10 min, day and night, so the screen never shows dashes for long.<br><br>" +
                 "Real today and Weather now are the real values for the phone's location (Open-Meteo); " +
                 "Watch should show is what the watch's sun screen should read now.<br><br>" +
                 "Refresh fetches the weather now and sends location and time to the watch (the app also does " +

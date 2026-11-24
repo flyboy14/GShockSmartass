@@ -166,6 +166,7 @@ The watch stays connected all day (the app repeats the official app's `0x39` han
 - five minutes before an alarm and after it (or when its snooze is stopped): switch the sound mode to what the alarm needs and back to yours
 - at the start and end of the night: silence the watch, when *Silent at night* is on
 - hourly, except from 00:00 to 06:00: refresh the sun data or the weather (a location and time sync — the watch only recalculates its sun times on a time write)
+- every 10 minutes, day and night: remind the watch of its location with just a location and a time packet (the watch drops its sun location on its own and shows dashes, and there is no way to read whether it still has it)
 - on every connection: one location and time sync
 
 It wakes itself with exact Android alarms, so this keeps working while the phone dozes overnight. Requests to the watch are shared between screens, retried when the watch does not answer and serialized per setting, so two quick changes cannot undo each other.

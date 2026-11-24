@@ -99,6 +99,10 @@ class H5600ViewModel @Inject constructor(
         if (key in writing || pendingWrites[key]?.isActive == true) shown else read ?: shown
     private val running = java.util.concurrent.atomic.AtomicInteger(0)
 
+    private val prefsListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == null || key.startsWith("temp_sun") || key.startsWith("last_sent")) reloadPrefs()
+    }
+
     init {
         // Sport / Settings values from the phone first (spinners only before the very first read),
         // saved again whenever one changes (a read or the user's edit).
@@ -108,6 +112,9 @@ class H5600ViewModel @Inject constructor(
                 .distinctUntilChanged().drop(1).collect { saveSettingsCache() }
         }
         viewModelScope.launch { HomeWifi.currentSsid.collect { w -> _state.update { it.copy(currentSsid = w) } } }
+        // Weather fetches and syncs run in the background (scheduler): show their values the moment
+        // they are stored, not only when the tab is opened again.
+        H5600Prefs.get(context).registerOnSharedPreferenceChangeListener(prefsListener)
         // The scheduler switches the sound mode around alarms and the night: show what it set.
         viewModelScope.launch {
             runner.soundModeSet.collect { m -> if (m != null) _state.update { it.copy(soundMode = m) } }
@@ -117,6 +124,11 @@ class H5600ViewModel @Inject constructor(
         viewModelScope.launch {
             org.avmedia.gshockGoogleSync.utils.AppTimeFormat.is24h.drop(1).collect { reloadPrefs() }
         }
+    }
+
+    override fun onCleared() {
+        H5600Prefs.get(context).unregisterOnSharedPreferenceChangeListener(prefsListener)
+        super.onCleared()
     }
 
     private fun reloadPrefs() = _state.update {

@@ -5,14 +5,24 @@ import java.time.LocalTime
 
 /**
  * How often the phone talks to the watch on its own. Every sync wakes the watch's radio, and the
- * battery went from full to half in 2-3 days at quarter-hour syncs, so periodic work is hourly and
- * stops overnight. Alarm writes, snooze repeats and syncs on connect are not paced.
+ * battery went from full to half in 2-3 days at quarter-hour full syncs + step syncs, so weather and
+ * steps are hourly and stop overnight. The sun keep-alive is 2 small packets every 10 min. Alarm
+ * writes, snooze repeats and syncs on connect are not paced.
  */
 object SyncPacing {
     /** Weather / sun-data refresh and step sync interval. */
     const val PERIODIC_MIN = 60L
 
-    /** No periodic syncs from [QUIET_START] (inclusive) to [QUIET_END] (exclusive). */
+    /**
+     * Light sun refresh (location + time, 2 packets) interval, day and night: the watch loses its
+     * sun location on its own, and nothing on the watch tells us when.
+     */
+    const val SUN_KEEP_MIN = 10L
+
+    /** Next light sun refresh after the last sun write at [last]. Pure. */
+    fun nextSunKeep(last: LocalDateTime): LocalDateTime = last.plusMinutes(SUN_KEEP_MIN)
+
+    /** No periodic weather / step syncs from [QUIET_START] (inclusive) to [QUIET_END] (exclusive). */
     val QUIET_START: LocalTime = LocalTime.MIDNIGHT
     val QUIET_END: LocalTime = LocalTime.of(6, 0)
 

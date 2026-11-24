@@ -34,7 +34,8 @@ import javax.inject.Singleton
  *    watch's single sound mode for the alarm due next, switches finished one-time alarms off, and
  *    snoozes: moves a snoozing alarm's slot to its next repeat a minute after each ring, until the
  *    snooze is stopped from the phone (the watch's own snooze is never used);
- *  - sun data: a loc/time sync on connect and hourly, not overnight ([SyncPacing]) (weather trick: [TempSun]);
+ *  - sun data: a loc/time sync on connect, weather hourly (not overnight), and a light
+ *    location + time refresh every 10 min, day and night ([SyncPacing]) (weather trick: [TempSun]);
  *  - dynamic watch face ([SunFace]) at the edges of the sunset window.
  * Runs once when the watch connects (before the regular connection actions) and, while it stays
  * connected, each part only when it is due.
@@ -243,15 +244,21 @@ class H5600ScheduleRunner @Inject constructor(
     }
 
     /**
-     * The watch sometimes drops its sun location on its own (seen 2026-11-16: dashes with no write
-     * from us). With the weather option off nothing else re-sends it, so do a loc/time sync hourly
-     * outside the quiet hours (the weather option does the same via its hourly fetch).
+     * The watch drops its sun location on its own while connected (2026-11-24: dashes within 48 min
+     * of a sync, no reconnect, no write from us) and reading 0x24 back always gives FF, so a drop
+     * cannot be detected. Keep it filled instead: every [SyncPacing.SUN_KEEP_MIN] min, day and
+     * night, a light refresh (location + time, 2 packets) — far cheaper than a full time sync.
      */
-    private suspend fun resendSunIfDue(): String? {
-        if (TempSun.isEnabled(context) || !api.isH5600SettingsSupported()) return null
-        val last = lastSunResend
-        if (last != null && LocalDateTime.now().isBefore(TempSun.nextFetch(last))) return null
-        return watchCall("sun re-send") { syncTimeAndLocation(); "sun data re-sent" }
+    private suspend fun keepSunIfDue() {
+        if (!api.isH5600SettingsSupported()) return
+        val last = lastSunResend ?: return // the sync on connect sets it
+        if (LocalDateTime.now().isBefore(SyncPacing.nextSunKeep(last))) return
+        watchCall("sun keep") {
+            rememberLocation()
+            withTimeout(15_000) { watchTimeUpdater.refreshSunLight() }
+            lastSunResend = LocalDateTime.now()
+            Timber.i("H5600 sun kept (location + time)")
+        }
     }
 
     /** Called once per connection when the session is Ready. */
@@ -438,14 +445,15 @@ class H5600ScheduleRunner @Inject constructor(
         return ok != null
     }
 
-    /** Hourly, not overnight: weather fetch (option on) or plain sun-data re-send (option off). */
+    /** Weather fetch + full sync hourly (not overnight); light sun keep-alive every 10 min, always. */
     private suspend fun applyPeriodicLocked(notes: MutableList<String>) {
         // Not while an alarm or a snooze repeat rings; the pass a minute later catches up.
         if (AlarmPool.load(context)?.let { AlarmPool.ringing(it, LocalDateTime.now()) } == true) return
-        if (SyncPacing.isQuiet(LocalDateTime.now())) return // battery: nothing periodic overnight
-        watchCall("location refresh", notes) { LocationProvider.refreshIfStale(context) }
-        refreshTempSunLocked(force = false)?.let { notes += it }
-        resendSunIfDue()?.let { notes += it }
+        if (!SyncPacing.isQuiet(LocalDateTime.now())) { // battery: no weather fetches overnight
+            watchCall("location refresh", notes) { LocationProvider.refreshIfStale(context) }
+            refreshTempSunLocked(force = false)?.let { notes += it }
+        }
+        keepSunIfDue()
     }
 
     /** Dynamic sunset-step toggle: Sun data from 4 h before sunset to 10 min after, Steps otherwise. */
@@ -493,7 +501,7 @@ class H5600ScheduleRunner @Inject constructor(
 
     /**
      * For a Ready session: while connected, run each part only when it is due — alarms at alarm
-     * boundaries, the face at sunset-window edges, the sun/weather refresh hourly (not overnight) —
+     * boundaries, the face at sunset-window edges, weather hourly, the sun keep-alive every 10 min —
      * instead of re-reading everything on a fixed timer.
      */
     suspend fun applyAtBoundariesWhileConnected(session: Session) = coroutineScope {
@@ -505,7 +513,8 @@ class H5600ScheduleRunner @Inject constructor(
                 // Re-evaluated every round (settings may change); idle re-check every 30 min.
                 val alarmAt = nextAlarmBoundary(now)
                 val faceAt = nextFaceSwitch(now)
-                val tickAt = TempSun.nextFetch(now)
+                val tickAt = listOfNotNull(TempSun.nextFetch(now), lastSunResend?.let { SyncPacing.nextSunKeep(it) })
+                    .minOf { it }
                 val next = listOfNotNull(alarmAt, faceAt, tickAt).minOrNull() ?: now.plusMinutes(30)
                 val sleepMs = Duration.between(now, next).toMillis().coerceAtMost(30 * 60_000L) + 5_000
                 // The exact alarm wakes us on time even in Doze; the timer below is only a backup.

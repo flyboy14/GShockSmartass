@@ -31,4 +31,12 @@ class WatchTimeUpdater @Inject constructor(
         // Keep timeMs NULL so we get system time just before sending it for better accuracy.
         api.setTime(timeMs = null, offsetFormSystemTime = fineAdjustment + timeZoneOffset)
     }
+
+    /** DW-H5600: location + time only (2 packets), same offsets as [updateTime]; refreshes sun data. */
+    suspend fun refreshSunLight() {
+        timeSettingsStorage.load()
+        val offset = LocalDataStorage.getFineTimeAdjustment(context) +
+            SolarTimeHelper.calculateTimeOffset(context, timeSettingsStorage.getTimeZoneOption())
+        api.h5600RefreshSun(offsetFormSystemTime = offset)
+    }
 }
