@@ -157,7 +157,7 @@ class H5600ScheduleRunner @Inject constructor(
     }
 
     /** The world city changed on the Time tab: sync now, in the background. */
-    fun requestWorldCitySync() = background("world city") { syncLocationAndTime() }
+    fun requestWorldCitySync() = background("world city") { syncTimeFull() }
 
     /**
      * Coordinates to send in 0x24: the phone's location, or, with "Temperature instead of sunrise"
@@ -198,7 +198,7 @@ class H5600ScheduleRunner @Inject constructor(
         val notes = mutableListOf<String>()
         val text = watchCall("temp", notes) {
             val c = withContext(Dispatchers.IO) { TempSun.fetchTemperature(context, loc.latitude, loc.longitude) }
-            syncTimeAndLocation()
+            refreshSunLight() // the city packets of a full sync are not needed for new weather
             "weather %d, %.1f °C → sunrise %d:%02d".format(
                 TempSun.lastCategory(context) ?: 0, c,
                 TempSun.lastCategory(context) ?: 0, Math.round(c).toInt().coerceIn(0, TempSun.MAX_TEMP),
@@ -212,10 +212,23 @@ class H5600ScheduleRunner @Inject constructor(
         effectiveLocation()?.let { (lat, lon) -> api.rememberH5600HomeLocation(lat, lon) }
     }
 
-    /** Time sync (location written inside it); the watch recalculates sun data only on such a write. */
+    /**
+     * Full time sync (DST, cities, location). About 1-2 min after one, the watch resets its sun
+     * location by itself -> dashes, even with the location re-sent as the last packet; location +
+     * time sent after that reset hold (tested 2026-11-24). So the next light refresh is pulled in
+     * to [SyncPacing.AFTER_FULL_SYNC_MIN] min after a full sync.
+     */
     private suspend fun syncTimeAndLocation() {
         rememberLocation()
         withTimeout(20_000) { watchTimeUpdater.updateTime() }
+        lastSunResend = LocalDateTime.now().minusMinutes(SyncPacing.SUN_KEEP_MIN - SyncPacing.AFTER_FULL_SYNC_MIN)
+        wake.trySend(Unit) // the boundary loop re-plans for that refresh
+    }
+
+    /** Location + time only (2 packets): the watch recalculates its sun times on the time write. */
+    private suspend fun refreshSunLight() {
+        rememberLocation()
+        withTimeout(15_000) { watchTimeUpdater.refreshSunLight() }
         lastSunResend = LocalDateTime.now()
     }
 
@@ -238,8 +251,13 @@ class H5600ScheduleRunner @Inject constructor(
     /** Something other than the scheduler wrote to the watch: the next pass reads it again. */
     fun forgetWatchState() { watchState = null }
 
-    /** "Send loc/time" button, temperature-trick corrections, real sunrise restored. */
+    /** "Send loc/time" button, temperature-trick corrections, real sunrise restored: light refresh. */
     suspend fun syncLocationAndTime() = mutex.withLock {
+        if (api.isH5600SettingsSupported()) refreshSunLight()
+    }
+
+    /** World city changed: a full sync (the city packets carry it). */
+    private suspend fun syncTimeFull() = mutex.withLock {
         if (api.isH5600SettingsSupported()) syncTimeAndLocation()
     }
 
@@ -254,9 +272,7 @@ class H5600ScheduleRunner @Inject constructor(
         val last = lastSunResend ?: return // the sync on connect sets it
         if (LocalDateTime.now().isBefore(SyncPacing.nextSunKeep(last))) return
         watchCall("sun keep") {
-            rememberLocation()
-            withTimeout(15_000) { watchTimeUpdater.refreshSunLight() }
-            lastSunResend = LocalDateTime.now()
+            refreshSunLight()
             Timber.i("H5600 sun kept (location + time)")
         }
     }

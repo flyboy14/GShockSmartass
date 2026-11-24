@@ -19,6 +19,9 @@ object SyncPacing {
      */
     const val SUN_KEEP_MIN = 10L
 
+    /** Light sun refresh this long after a full time sync (the watch resets its location ~1-2 min after one). */
+    const val AFTER_FULL_SYNC_MIN = 3L
+
     /** Next light sun refresh after the last sun write at [last]. Pure. */
     fun nextSunKeep(last: LocalDateTime): LocalDateTime = last.plusMinutes(SUN_KEEP_MIN)
 
