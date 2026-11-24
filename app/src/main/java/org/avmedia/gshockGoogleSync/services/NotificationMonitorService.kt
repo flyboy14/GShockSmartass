@@ -52,9 +52,13 @@ class NotificationMonitorService : NotificationListenerService() {
         // Debug builds also pass adb test notifications: adb shell cmd notification post -t Title tag Text
         val adbTest = org.avmedia.gshockGoogleSync.BuildConfig.DEBUG && sbn.packageName == "com.android.shell"
         if (!adbTest && !org.avmedia.gshockGoogleSync.h5600.NotificationFilter.allows(applicationContext, sbn.packageName)) return
+        // Group summaries (Android's auto-group, Slack/WhatsApp bundles) repeat or blank out the
+        // messages already sent: on the watch they arrived as a second, empty notification.
+        if (sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
 
         processNotification(sbn)
             .onSuccess { notificationInfo ->
+                if (notificationInfo.title.isBlank() && notificationInfo.text.isBlank()) return@onSuccess
                 Timber.i("Notification received: $notificationInfo")
                 createAppNotification(notificationInfo)
                     .let { appNotification ->
