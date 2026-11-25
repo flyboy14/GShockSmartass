@@ -6,7 +6,7 @@ import java.time.LocalTime
 /**
  * How often the phone talks to the watch on its own. Every sync wakes the watch's radio, and the
  * battery went from full to half in 2-3 days at quarter-hour full syncs + step syncs, so weather and
- * steps are hourly and stop overnight. The sun keep-alive is 2 small packets every 10 min. Alarm
+ * steps are hourly and stop overnight. The sun keep-alive is 2 small packets every 3 min. Alarm
  * writes, snooze repeats and syncs on connect are not paced.
  */
 object SyncPacing {
@@ -17,7 +17,7 @@ object SyncPacing {
      * Light sun refresh (location + time, 2 packets) interval, day and night: the watch loses its
      * sun location on its own, and nothing on the watch tells us when.
      */
-    const val SUN_KEEP_MIN = 10L
+    const val SUN_KEEP_MIN = 3L
 
     /** Light sun refresh this long after a full time sync (the watch resets its location ~1-2 min after one). */
     const val AFTER_FULL_SYNC_MIN = 3L

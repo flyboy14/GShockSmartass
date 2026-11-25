@@ -35,7 +35,7 @@ import javax.inject.Singleton
  *    snoozes: moves a snoozing alarm's slot to its next repeat a minute after each ring, until the
  *    snooze is stopped from the phone (the watch's own snooze is never used);
  *  - sun data: a loc/time sync on connect, weather hourly (not overnight), and a light
- *    location + time refresh every 10 min, day and night ([SyncPacing]) (weather trick: [TempSun]);
+ *    location + time refresh every 3 min, day and night ([SyncPacing]) (weather trick: [TempSun]);
  *  - dynamic watch face ([SunFace]) at the edges of the sunset window.
  * Runs once when the watch connects (before the regular connection actions) and, while it stays
  * connected, each part only when it is due.
@@ -461,7 +461,7 @@ class H5600ScheduleRunner @Inject constructor(
         return ok != null
     }
 
-    /** Weather fetch + full sync hourly (not overnight); light sun keep-alive every 10 min, always. */
+    /** Weather fetch + full sync hourly (not overnight); light sun keep-alive every 3 min, always. */
     private suspend fun applyPeriodicLocked(notes: MutableList<String>) {
         // Not while an alarm or a snooze repeat rings; the pass a minute later catches up.
         if (AlarmPool.load(context)?.let { AlarmPool.ringing(it, LocalDateTime.now()) } == true) return
@@ -517,27 +517,34 @@ class H5600ScheduleRunner @Inject constructor(
 
     /**
      * For a Ready session: while connected, run each part only when it is due — alarms at alarm
-     * boundaries, the face at sunset-window edges, weather hourly, the sun keep-alive every 10 min —
+     * boundaries, the face at sunset-window edges, weather hourly, the sun keep-alive every 3 min —
      * instead of re-reading everything on a fixed timer.
      */
     suspend fun applyAtBoundariesWhileConnected(session: Session) = coroutineScope {
         val ready = session.state.first { it.phase is SessionPhase.Ready || it.phase is SessionPhase.Closed }
         if (ready.phase !is SessionPhase.Ready) return@coroutineScope
         val loop = launch {
+            // An alarm boundary not yet acted on survives into the next round. Without it, a round
+            // that wakes just before the boundary (e.g. for a sun refresh held back while a snooze
+            // repeat rings) and the next round starting just after it both skipped it: the slot kept
+            // the old repeat and the snooze stopped ringing (2026-11-25, 8:20 -> nothing at 8:30/8:40).
+            var pendingAlarm: LocalDateTime? = null
             while (true) {
                 val now = LocalDateTime.now()
                 // Re-evaluated every round (settings may change); idle re-check every 30 min.
-                val alarmAt = nextAlarmBoundary(now)
+                val alarmAt = listOfNotNull(pendingAlarm, nextAlarmBoundary(now)).minOrNull()
                 val faceAt = nextFaceSwitch(now)
                 val tickAt = listOfNotNull(TempSun.nextFetch(now), lastSunResend?.let { SyncPacing.nextSunKeep(it) })
                     .minOf { it }
                 val next = listOfNotNull(alarmAt, faceAt, tickAt).minOrNull() ?: now.plusMinutes(30)
-                val sleepMs = Duration.between(now, next).toMillis().coerceAtMost(30 * 60_000L) + 5_000
+                // At least 5 s: a due refresh held back during a ring must not spin the loop.
+                val sleepMs = Duration.between(now, next).toMillis().coerceIn(0L, 30 * 60_000L) + 5_000
                 // The exact alarm wakes us on time even in Doze; the timer below is only a backup.
                 SchedulerWakeup.schedule(context, now.plusNanos(sleepMs * 1_000_000))
                 // Woken early when alarms change: re-plan without running anything that is not due.
                 kotlinx.coroutines.withTimeoutOrNull(sleepMs) { wake.receive() }
                 val woke = LocalDateTime.now()
+                pendingAlarm = alarmAt?.takeIf { woke.isBefore(it) } // not reached yet: keep it
                 SchedulerWakeup.awake(context) { mutex.withLock {
                     if (!api.isH5600SettingsSupported()) return@withLock
                     val notes = mutableListOf<String>()
